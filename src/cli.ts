@@ -1,6 +1,6 @@
 import { Array, Console, DateTime, Effect, FileSystem, Option, Path, type PlatformError, type Redacted, Schema } from "effect"
 import { Argument, CliError, Command, Flag } from "effect/cli"
-import { FetchHttpClient, type HttpClientError } from "effect/http"
+import type { HttpClientError } from "effect/http"
 import { type HttpApi, HttpApiClient, type HttpApiGroup } from "effect/http-api"
 import type { ApiKey } from "./ApiKey.ts"
 import { layerAdminClient } from "./ApiKeyAuth.ts"
@@ -131,6 +131,7 @@ const migrations = Command.make("migrations").pipe(
  * `keys create | list | revoke | delete`, an `effect/cli` command for the app's own CLI, calling its `ApiKeyRoutes` at `url`
  * with `adminKey`. `create` prints the key alone on stdout, so it pipes; everything else goes to stderr.
  * `keys migrations new | check <dir>` write and check the library's migrations in the app's folder, without the app.
+ * The calls need an `HttpClient`, which the app provides, e.g. `FetchHttpClient.layer`.
  */
 export const keysCommand = <ApiId extends string, Groups extends HttpApiGroup.Constraint, E, R>(
   options: KeysCommandOptions<ApiId, Groups, E, R>,
@@ -144,7 +145,7 @@ export const keysCommand = <ApiId extends string, Groups extends HttpApiGroup.Co
         Effect.provide(layerAdminClient(yield* options.adminKey)),
       )
       return yield* use(client.apiKeys).pipe(Effect.mapError((error) => new KeysCommandError({ message: messageOf(baseUrl, error) })))
-    }).pipe(Effect.provide(FetchHttpClient.layer))
+    })
 
   const create = Command.make("create", { name: nameArgument, email: emailFlag, scopes: scopeFlag }, ({ name, email, scopes }) =>
     Effect.gen(function* () {

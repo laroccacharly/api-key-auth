@@ -145,6 +145,7 @@ const keys = keysCommand({
   adminKey: ProxyAdminApiKey.resolve, // Effect<Redacted<string>>
 })
 Command.withSubcommands(proxy, [keys])
+// …and the app provides an HttpClient: Effect.provide(FetchHttpClient.layer)
 ```
 
 - `<app> keys create <name> [--email <email>] --scope push [--scope images] | --scope all`: prints the key once,
@@ -156,7 +157,8 @@ Command.withSubcommands(proxy, [keys])
   folder (section 9). They work on files only, without calling the app.
 
 The library takes the url and admin key as effects, so it doesn't depend on effect-lib; the app passes its secrets.
-The command calls the app with effect's fetch client. A failed call is a `KeysCommandError` whose one-line message
+The command calls the app through the `HttpClient` the app provides, so it chooses the transport, e.g.
+`FetchHttpClient.layer`. A failed call is a `KeysCommandError` whose one-line message
 (`https://… refused the admin key`) `Command.run` prints.
 
 ### 9. Schema: migration files in the app
