@@ -1,6 +1,6 @@
 {
   "name": "api-key-auth",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "description": "API keys for Effect HttpApi servers: hashed in SQL, scoped, with admin routes, a CLI and client middlewares",

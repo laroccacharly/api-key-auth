@@ -11,12 +11,13 @@ export const makeApiKeyRoutes = <const Prefix extends PathInput>(prefix: Prefix)
     .add(
       HttpApiEndpoint.post("create", "/keys", { payload: NewApiKey, success: CreatedApiKey, error: UnknownScope }),
       HttpApiEndpoint.get("list", "/keys", { query: { email: Schema.optionalKey(Email) }, success: Schema.Array(ApiKey) }),
-      HttpApiEndpoint.delete("revoke", "/keys/:id", { params: { id: Schema.String }, success: HttpApiSchema.NoContent, error: NotFound }),
+      HttpApiEndpoint.post("revoke", "/keys/:id/revoke", { params: { id: Schema.String }, success: HttpApiSchema.NoContent, error: NotFound }),
+      HttpApiEndpoint.delete("delete", "/keys/:id", { params: { id: Schema.String }, success: HttpApiSchema.NoContent, error: NotFound }),
     )
     .middleware(Admin)
     .prefix(prefix)
 
-/** The admin routes, added by the app to its `HttpApi`: create, list and revoke keys under `/api/keys`. */
+/** The admin routes, added by the app to its `HttpApi`: create, list, revoke and delete keys under `/api/keys`. */
 export class ApiKeyRoutes extends makeApiKeyRoutes("/api") {}
 
 // The library's code is typed against this API; at runtime it uses the app's, whose prefix and annotations it reads.

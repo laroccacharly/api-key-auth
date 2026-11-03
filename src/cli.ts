@@ -128,7 +128,7 @@ const migrations = Command.make("migrations").pipe(
 )
 
 /**
- * `keys create | list | revoke`, an `effect/cli` command for the app's own CLI, calling its `ApiKeyRoutes` at `url`
+ * `keys create | list | revoke | delete`, an `effect/cli` command for the app's own CLI, calling its `ApiKeyRoutes` at `url`
  * with `adminKey`. `create` prints the key alone on stdout, so it pipes; everything else goes to stderr.
  * `keys migrations new | check <dir>` write and check the library's migrations in the app's folder, without the app.
  */
@@ -169,5 +169,11 @@ export const keysCommand = <ApiId extends string, Groups extends HttpApiGroup.Co
       yield* Console.error(`Revoked the key ${id}`)
     })).pipe(Command.withDescription("Revoke a key: it answers 401 from now on"))
 
-  return Command.make("keys").pipe(Command.withDescription("Manage API keys"), Command.withSubcommands([create, list, revoke, migrations]))
+  const deleteCommand = Command.make("delete", { id: idArgument }, ({ id }) =>
+    Effect.gen(function* () {
+      yield* callApiKeyRoutes((client) => client.delete({ params: { id } }))
+      yield* Console.error(`Deleted the key ${id}`)
+    })).pipe(Command.withDescription("Delete a key: it answers 401 and leaves the list"))
+
+  return Command.make("keys").pipe(Command.withDescription("Manage API keys"), Command.withSubcommands([create, list, revoke, deleteCommand, migrations]))
 }

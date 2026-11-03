@@ -65,7 +65,10 @@ sides, so lengths don't leak; an empty bearer is always 401):
 - `POST   /api/keys`      `{ name, email?, scopes }` → `{ id, name, email, scopes, created_at, key }`
 - `GET    /api/keys`      → every key, revoked ones included, oldest first, never the hash; `?email=` filters
   (normalized like `email`)
-- `DELETE /api/keys/:id`  revokes, 204; an unknown id is 404; revoking again keeps the first `revoked_at`
+- `POST   /api/keys/:id/revoke`  sets `revoked_at`, 204: the key answers 401 and stays listed; an unknown id is 404;
+  revoking again keeps the first `revoked_at`
+- `DELETE /api/keys/:id`  deletes the row, 204: the key answers 401 and leaves the list; an unknown id is 404. For
+  keys that shouldn't stay listed, e.g. an app's live tests'.
 
 A key in JSON: `{ id, name, email, scopes, created_at, last_used_at, revoked_at }`, with `null` for an absent email or
 time, and times as ISO 8601 strings. `name` is 1 to 200 characters, `scopes` at least one.
@@ -114,7 +117,7 @@ const routes = HttpApiBuilder.layer(ProxyApi).pipe(
   to its whole API (a rate limit) wraps `ApiKeyRoutes` too, and must be provided, as in email-auth.
 - An app that doesn't want the admin routes (bench's self-serve sign-up) can skip `ApiKeyRoutes` and use
   `ApiKeyAuth.layerBearer({ prefix?, scopes? })` alone, which provides `Bearer` and the `ApiKeys` service for its own
-  handlers: `ApiKeys.create({ name, email?, scopes })`, `list({ email? })`, `revoke(id)`, `findByKey(key)` (the key's
+  handlers: `ApiKeys.create({ name, email?, scopes })`, `list({ email? })`, `revoke(id)`, `delete(id)`, `findByKey(key)` (the key's
   record, revoked or not, as an `Option`).
 - Handlers read the caller with `yield* CurrentApiKey`.
 
@@ -148,7 +151,7 @@ Command.withSubcommands(proxy, [keys])
   alone on stdout, so it pipes (`| cpass …`); everything else on stderr.
 - `<app> keys list [--email <email>]`: a table on stdout (id, name, email, scopes, created, last used, status),
   revoked keys marked.
-- `<app> keys revoke <id>`: confirms on stderr.
+- `<app> keys revoke <id>` and `<app> keys delete <id>`: confirm on stderr.
 - `<app> keys migrations new <dir>` and `<app> keys migrations check <dir>`: the library's migration files in the app's
   folder (section 9). They work on files only, without calling the app.
 
@@ -209,9 +212,9 @@ Through the public API only, in memory, all under 20 seconds:
   and names a missing version or an edited file; both refuse a version twice or out of order.
 - Cases: create returns a key once, list never shows a hash; the key opens a route with its scope; the prefix is
   applied when set and absent by default; `all` opens every route; a missing scope is 403; no key, a wrong key, a
-  revoked key are 401; the admin key on a consumer route and a consumer key on `ApiKeyRoutes` are 401; `email` is
+  revoked key and a deleted key are 401; the admin key on a consumer route and a consumer key on `ApiKeyRoutes` are 401; `email` is
   normalized and filters `list`; `last_used_at` moves, at most once a minute (with `TestClock`).
-- The CLI against the same in-memory server: create prints only the key on stdout; list; revoke; a wrong admin key
+- The CLI against the same in-memory server: create prints only the key on stdout; list; revoke; delete; a wrong admin key
   fails with a message.
 - `layerBearer` alone, with keys created in the app's own handler, as bench will; `ApiKeyAuth.layer` on an `HttpApi`
   without `ApiKeyRoutes` is a compile error.

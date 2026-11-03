@@ -109,6 +109,11 @@ const makeKeyStore = Effect.fnUntraced(function* (options: KeyStoreOptions) {
     if (revoked.length === 0) return yield* new NotFound({ id })
   })
 
+  const deleteKey = Effect.fnUntraced(function* (id: string): Effect.fn.Return<void, NotFound> {
+    const deleted = yield* Effect.orDie(sql`DELETE FROM api_key_auth_keys WHERE id = ${id} RETURNING id`)
+    if (deleted.length === 0) return yield* new NotFound({ id })
+  })
+
   const findByKey = (key: string) => hashKeyHex(key).pipe(Effect.flatMap(findByHash), Effect.orDie, Effect.provideContext(services))
 
   /** Records a use of `apiKey`, unless one was recorded less than a minute ago. */
@@ -120,7 +125,7 @@ const makeKeyStore = Effect.fnUntraced(function* (options: KeyStoreOptions) {
       WHERE id = ${apiKey.id} AND (last_used_at IS NULL OR last_used_at <= ${staleBefore})`)
   })
 
-  return { create, list, revoke, findByKey, markUsed }
+  return { create, list, revoke, delete: deleteKey, findByKey, markUsed }
 })
 
 /** The `api_key_auth_keys` table, brought up to date when the layer is built. */
@@ -128,6 +133,8 @@ export class KeyStore extends Context.Service<KeyStore, {
   readonly create: (newKey: NewApiKey) => Effect.Effect<CreatedApiKey, UnknownScope>
   readonly list: (filter?: { readonly email?: string }) => Effect.Effect<ReadonlyArray<ApiKey>>
   readonly revoke: (id: string) => Effect.Effect<void, NotFound>
+  /** Removes the key's row: it answers 401 and `list` no longer shows it. */
+  readonly delete: (id: string) => Effect.Effect<void, NotFound>
   /** The key whose plaintext is `key`, revoked or not. */
   readonly findByKey: (key: string) => Effect.Effect<Option.Option<ApiKey>>
   /** Records a use of `apiKey`, unless one was recorded less than a minute ago. */

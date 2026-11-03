@@ -55,6 +55,15 @@ test("revoke makes the key answer 401", async () => {
   expect(await push(key)).toBe("Unauthorized")
 })
 
+test("delete makes the key answer 401 and leave the list", async () => {
+  app = await makeTestApp()
+  const key = await createWithCli("laptop", "--scope", "push")
+  const { exit } = await runKeysCommand(app, ["delete", await idOf("laptop")])
+  expect(Exit.isSuccess(exit)).toBe(true)
+  expect(await push(key)).toBe("Unauthorized")
+  expect((await runKeysCommand(app, ["list"])).stdout.join("\n")).not.toContain("laptop")
+})
+
 test("a wrong admin key fails with a message, and prints no key", async () => {
   app = await makeTestApp()
   const { exit, stdout } = await runKeysCommand(app, ["create", "laptop", "--scope", "push"], Redacted.make("not-the-admin-key"))

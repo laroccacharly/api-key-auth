@@ -9,6 +9,8 @@ export class ApiKeys extends Context.Service<ApiKeys, {
   /** Every key, revoked ones included, oldest first; only those of `email` when given. */
   readonly list: (filter?: { readonly email?: string }) => Effect.Effect<ReadonlyArray<ApiKey>>
   readonly revoke: (id: string) => Effect.Effect<void, NotFound>
+  /** Removes the key, unlike `revoke`, which keeps it listed. */
+  readonly delete: (id: string) => Effect.Effect<void, NotFound>
   /** The key whose plaintext is `key`, revoked or not. */
   readonly findByKey: (key: string) => Effect.Effect<Option.Option<ApiKey>>
 }>()("api-key-auth/ApiKeys") {}
@@ -17,6 +19,6 @@ export const apiKeysLayer = Layer.effect(
   ApiKeys,
   Effect.gen(function* () {
     const store = yield* KeyStore
-    return ApiKeys.of({ create: store.create, list: store.list, revoke: store.revoke, findByKey: store.findByKey })
+    return ApiKeys.of({ create: store.create, list: store.list, revoke: store.revoke, delete: store.delete, findByKey: store.findByKey })
   }),
 )

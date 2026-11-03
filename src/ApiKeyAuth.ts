@@ -73,6 +73,7 @@ const apiKeyRoutesHandlers = (api: typeof ApiKeyAuthApi) =>
       create: ({ payload }) => store.create(payload),
       list: ({ query }) => store.list(query),
       revoke: ({ params }) => store.revoke(params.id),
+      delete: ({ params }) => store.delete(params.id),
     })
   }))
 

@@ -124,6 +124,25 @@ describe("unauthorized", () => {
     expect(Option.isSome(revoked!.revoked_at)).toBe(true)
   })
 
+  test("a deleted key is 401 and leaves the list; deleting an unknown id is 404", async () => {
+    app = await makeTestApp()
+    const created = await createKey({ name: "laptop", scopes: ["push"] })
+    expect(await app.outcome(Effect.flatMap(admin(), (client) => client.apiKeys.delete({ params: { id: created.id } })))).toBe("ok")
+    expect(await push(created.key)).toBe("Unauthorized")
+    expect(await listKeys()).toEqual([])
+    expect(await app.outcome(Effect.flatMap(admin(), (client) => client.apiKeys.delete({ params: { id: created.id } })))).toBe("NotFound")
+  })
+
+  test("POST /api/keys/:id/revoke keeps the key listed, DELETE /api/keys/:id removes it", async () => {
+    app = await makeTestApp()
+    const revoked = await createKey({ name: "revoked", scopes: ["push"] })
+    const deleted = await createKey({ name: "deleted", scopes: ["push"] })
+    const auth = { authorization: `Bearer ${Redacted.value(adminKey)}` }
+    expect((await app.fetch(`${baseUrl}/api/keys/${revoked.id}/revoke`, { method: "POST", headers: auth })).status).toBe(204)
+    expect((await app.fetch(`${baseUrl}/api/keys/${deleted.id}`, { method: "DELETE", headers: auth })).status).toBe(204)
+    expect((await listKeys()).map((key) => key.name)).toEqual(["revoked"])
+  })
+
   test("revoking an unknown id is 404", async () => {
     app = await makeTestApp()
     expect(await revokeKey("no-such-id")).toBe("NotFound")
