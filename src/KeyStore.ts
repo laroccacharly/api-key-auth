@@ -1,10 +1,9 @@
 import { Array, Clock, Context, DateTime, Duration, Effect, Layer, Option, Schema } from "effect"
 import { Digest, SecureRandom } from "effect/crypto"
-import { SqlClient, type SqlError, SqlSchema } from "effect/sql"
+import { SqlClient, SqlSchema } from "effect/sql"
 import { allScope, type ApiKey, type CreatedApiKey, type NewApiKey } from "./ApiKey.ts"
 import { NotFound, UnknownScope } from "./Errors.ts"
 import { generateKey, hashKeyHex } from "./Key.ts"
-import { installSchema } from "./SchemaInstall.ts"
 
 export interface KeyStoreOptions {
   /** Put before every new key, e.g. `pxy_`. None by default. */
@@ -52,7 +51,6 @@ const isLastUseStale = (apiKey: ApiKey, now: number) =>
   })
 
 const makeKeyStore = Effect.fnUntraced(function* (options: KeyStoreOptions) {
-  yield* installSchema
   const sql = yield* SqlClient.SqlClient
   const services = yield* Effect.context<Digest.Digest | SecureRandom.SecureRandom>()
   const prefix = options.prefix ?? ""
@@ -92,7 +90,7 @@ const makeKeyStore = Effect.fnUntraced(function* (options: KeyStoreOptions) {
       id,
       key_hash: yield* hashKeyHex(key),
       name: newKey.name,
-      email: newKey.email === undefined ? null : normalizeEmail(newKey.email),
+      email: Option.getOrNull(Option.map(Option.fromUndefinedOr(newKey.email), normalizeEmail)),
       scopes: JSON.stringify(scopes),
       created_at: yield* Clock.currentTimeMillis,
     }
@@ -135,7 +133,7 @@ export class KeyStore extends Context.Service<KeyStore, {
   /** Records a use of `apiKey`, unless one was recorded less than a minute ago. */
   readonly markUsed: (apiKey: ApiKey) => Effect.Effect<void>
 }>()("api-key-auth/KeyStore") {
-  static readonly layer = (options: KeyStoreOptions): Layer.Layer<KeyStore, SqlError.SqlError, SqlClient.SqlClient> =>
+  static readonly layer = (options: KeyStoreOptions): Layer.Layer<KeyStore, never, SqlClient.SqlClient> =>
     Layer.effect(KeyStore, makeKeyStore(options)).pipe(
       Layer.provide([Digest.layerWebCrypto, SecureRandom.layerWebCrypto]),
     )

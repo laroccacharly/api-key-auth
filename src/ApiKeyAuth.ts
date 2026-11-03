@@ -2,7 +2,7 @@ import { type Config, Context, Effect, Layer, Option, Redacted } from "effect"
 import { Digest, Mac } from "effect/crypto"
 import { HttpClientRequest } from "effect/http"
 import { type HttpApi, HttpApiBuilder, type HttpApiEndpoint, type HttpApiGroup, HttpApiMiddleware } from "effect/http-api"
-import type { SqlClient, SqlError } from "effect/sql"
+import type { SqlClient } from "effect/sql"
 import { allScope, type ApiKey, type CallingApiKey } from "./ApiKey.ts"
 import { type ApiKeyAuthApi, type ApiKeyRoutesOf, type RequireApiKeyRoutes } from "./ApiKeyRoutes.ts"
 import { ApiKeys, apiKeysLayer } from "./ApiKeys.ts"
@@ -85,23 +85,23 @@ type AppMiddlewareOf<Groups> = Exclude<
 >
 
 /**
- * `Bearer` and `ApiKeys` without the admin routes, for an app that creates keys in its own handlers. Brings the
- * tables up to date when built.
+ * `Bearer` and `ApiKeys` without the admin routes, for an app that creates keys in its own handlers. The tables must
+ * be there already: `keys migrations new` writes them into the app's migrations.
  */
-export const layerBearer = (options: BearerOptions = {}): Layer.Layer<Bearer | ApiKeys, SqlError.SqlError, SqlClient.SqlClient> =>
+export const layerBearer = (options: BearerOptions = {}): Layer.Layer<Bearer | ApiKeys, never, SqlClient.SqlClient> =>
   Layer.mergeAll(bearerMiddleware, apiKeysLayer).pipe(Layer.provide(KeyStore.layer(options)))
 
 /**
  * The `ApiKeyRoutes` handlers, the `Bearer` and `Admin` middlewares and `ApiKeys`, for an app whose `HttpApi`
  * includes `ApiKeyRoutes`. Middleware the app adds to its whole API runs on `ApiKeyRoutes` too, so the layer needs it
- * provided. Brings the tables up to date when built.
+ * provided. The tables must be there already: `keys migrations new` writes them into the app's migrations.
  */
 export const layer = <ApiId extends string, Groups extends HttpApiGroup.Constraint>(
   api: HttpApi.HttpApi<ApiId, Groups> & RequireApiKeyRoutes<Groups>,
   options: ApiKeyAuthOptions,
 ): Layer.Layer<
   HttpApiGroup.Service<ApiId, "apiKeys"> | Bearer | Admin | ApiKeys,
-  Config.ConfigError | SqlError.SqlError,
+  Config.ConfigError,
   SqlClient.SqlClient | AppMiddlewareOf<Groups>
 > => {
   const handlers = apiKeyRoutesHandlers(api as never as typeof ApiKeyAuthApi) as Layer.Layer<

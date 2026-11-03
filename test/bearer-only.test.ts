@@ -1,9 +1,9 @@
-import { SqliteClient } from "@effect/sql-sqlite-bun"
 import { afterEach, expect, test } from "bun:test"
 import { Config, Effect, Layer, Redacted, Schema } from "effect"
 import { HttpRouter, HttpServer } from "effect/http"
 import { HttpApi, HttpApiBuilder, HttpApiEndpoint, HttpApiGroup } from "effect/http-api"
 import { ApiKeyAuth, ApiKeys, CreatedApiKey, CurrentApiKey } from "../src/index.ts"
+import { migratedSqlite } from "./app.ts"
 
 // An app like bench: anyone signs up for a key with all scopes, and no admin routes.
 class SignUpRoutes extends HttpApiGroup.make("signUp")
@@ -28,7 +28,7 @@ const { handler, dispose } = HttpRouter.toWebHandler(
   HttpApiBuilder.layer(SelfServeApi).pipe(
     Layer.provide([signUpHandlers, jobsHandlers]),
     Layer.provide(ApiKeyAuth.layerBearer({ prefix: "bench_" })),
-    Layer.provide(SqliteClient.layer({ filename: ":memory:" })),
+    Layer.provide(migratedSqlite(":memory:")),
     Layer.provide(HttpServer.layerServices),
   ),
   { disableLogger: true },

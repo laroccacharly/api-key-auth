@@ -1,4 +1,4 @@
-import { Array, Console, DateTime, Effect, Option, type Redacted, Schema } from "effect"
+import { Array, Console, DateTime, Effect, FileSystem, Option, Path, type PlatformError, type Redacted, Schema } from "effect"
 import { Argument, CliError, Command, Flag } from "effect/cli"
 import { FetchHttpClient, type HttpClientError } from "effect/http"
 import { type HttpApi, HttpApiClient, type HttpApiGroup } from "effect/http-api"
@@ -6,6 +6,7 @@ import type { ApiKey } from "./ApiKey.ts"
 import { layerAdminClient } from "./ApiKeyAuth.ts"
 import { ApiKeyAuthApi, type RequireApiKeyRoutes } from "./ApiKeyRoutes.ts"
 import type { NotFound, Unauthorized, UnknownScope } from "./Errors.ts"
+import { contentsOf, libraryFiles, misplacedFile, missingVersions, newMigrationFiles } from "./Schema.ts"
 
 export interface KeysCommandOptions<ApiId extends string, Groups extends HttpApiGroup.Constraint, E, R> {
   /** The app's `HttpApi`, with `ApiKeyRoutes`. */
@@ -65,10 +66,71 @@ const nameArgument = Argument.String("name").pipe(Argument.withDescription("A la
 const emailFlag = Flag.String("email").pipe(Flag.optional, Flag.withDescription("Whose key it is, to find their keys later"))
 const scopeFlag = Flag.String("scope").pipe(Flag.atLeast(1), Flag.withDescription("A scope the key may call, or `all`; repeat for more"))
 const idArgument = Argument.String("id").pipe(Argument.withDescription("The key's id, from `list`"))
+const dirArgument = Argument.Directory("dir").pipe(Argument.withDescription("The app's migrations folder, e.g. ./migrations"))
+
+const fileSystemFailure = (error: PlatformError.PlatformError) => new KeysCommandError({ message: error.message })
+
+/** The file names in `dir`, none when it doesn't exist yet; fails when the library's are out of place. */
+const namesIn = Effect.fnUntraced(function* (dir: string) {
+  const fs = yield* FileSystem.FileSystem
+  if (!(yield* fs.exists(dir))) return []
+  const names = yield* fs.readDirectory(dir)
+  const misplaced = misplacedFile(names)
+  if (Option.isSome(misplaced)) {
+    const message = `${misplaced.value} is out of place: the api-key-auth files must run v1, v2, … in order, once each`
+    return yield* new KeysCommandError({ message })
+  }
+  return names
+}, Effect.catchTag("PlatformError", (error) => Effect.fail(fileSystemFailure(error))))
+
+const newMigrations = Command.make("new", { dir: dirArgument }, ({ dir }) =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem
+    const path = yield* Path.Path
+    const files = newMigrationFiles(yield* namesIn(dir))
+    if (files.length === 0) return yield* Console.error(`${dir} has every api-key-auth migration`)
+    yield* fs.makeDirectory(dir, { recursive: true })
+    for (const file of files) {
+      yield* fs.writeFileString(path.join(dir, file.name), file.contents)
+      yield* Console.error(`Wrote ${path.join(dir, file.name)}`)
+    }
+  }).pipe(Effect.catchTag("PlatformError", (error) => Effect.fail(fileSystemFailure(error))))).pipe(Command.withDescription("Write the library's missing migrations into the app's folder"))
+
+/** The library's files in `dir` whose contents aren't what `new` wrote. */
+const editedFiles = Effect.fnUntraced(function* (dir: string, names: ReadonlyArray<string>) {
+  const fs = yield* FileSystem.FileSystem
+  const path = yield* Path.Path
+  const edited: Array<string> = []
+  for (const [version, name] of libraryFiles(names)) {
+    if ((yield* fs.readFileString(path.join(dir, name))) !== contentsOf(version)) edited.push(name)
+  }
+  return edited
+})
+
+const checkMigrations = Command.make("check", { dir: dirArgument }, ({ dir }) =>
+  Effect.gen(function* () {
+    const names = yield* namesIn(dir)
+    const missing = missingVersions(names)
+    if (missing.length > 0) {
+      const versions = missing.map((version) => `v${version}`).join(", ")
+      return yield* new KeysCommandError({ message: `${dir} lacks api-key-auth ${versions}: run \`keys migrations new ${dir}\`` })
+    }
+    const edited = yield* editedFiles(dir, names).pipe(Effect.mapError(fileSystemFailure))
+    if (edited.length > 0) {
+      return yield* new KeysCommandError({ message: `${edited.join(", ")} no longer hold what \`keys migrations new\` wrote` })
+    }
+    yield* Console.error(`${dir} has every api-key-auth migration, unedited`)
+  })).pipe(Command.withDescription("Fail unless the app's folder has every migration of the library, unedited"))
+
+const migrations = Command.make("migrations").pipe(
+  Command.withDescription("The library's tables, as files in the app's migrations"),
+  Command.withSubcommands([newMigrations, checkMigrations]),
+)
 
 /**
  * `keys create | list | revoke`, an `effect/cli` command for the app's own CLI, calling its `ApiKeyRoutes` at `url`
  * with `adminKey`. `create` prints the key alone on stdout, so it pipes; everything else goes to stderr.
+ * `keys migrations new | check <dir>` write and check the library's migrations in the app's folder, without the app.
  */
 export const keysCommand = <ApiId extends string, Groups extends HttpApiGroup.Constraint, E, R>(
   options: KeysCommandOptions<ApiId, Groups, E, R>,
@@ -107,5 +169,5 @@ export const keysCommand = <ApiId extends string, Groups extends HttpApiGroup.Co
       yield* Console.error(`Revoked the key ${id}`)
     })).pipe(Command.withDescription("Revoke a key: it answers 401 from now on"))
 
-  return Command.make("keys").pipe(Command.withDescription("Manage API keys"), Command.withSubcommands([create, list, revoke]))
+  return Command.make("keys").pipe(Command.withDescription("Manage API keys"), Command.withSubcommands([create, list, revoke, migrations]))
 }

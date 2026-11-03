@@ -1,10 +1,15 @@
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { BunFileSystem } from "@effect/platform-bun"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
-import { Clock, Config, Console, type Duration, Effect, FileSystem, Layer, Path, Redacted, Schema, Stdio, Terminal } from "effect"
+import { Clock, Config, Console, type Duration, Effect, Layer, Path, Redacted, Schema, Stdio, Terminal } from "effect"
 import { Command } from "effect/cli"
 import { Base64Url } from "effect/encoding"
 import { FetchHttpClient, type HttpClient, HttpRouter, HttpServer, HttpServerResponse } from "effect/http"
 import { HttpApi, HttpApiBuilder, HttpApiClient, HttpApiEndpoint, HttpApiGroup, HttpApiMiddleware } from "effect/http-api"
 import { ChildProcessSpawner } from "effect/process"
+import { SqlClient } from "effect/sql"
 import { TestClock } from "effect/testing"
 import { keysCommand } from "../src/cli.ts"
 import { ApiKeyAuth, ApiKeyRoutes, CurrentApiKey, makeApiKeyRoutes } from "../src/index.ts"
@@ -67,12 +72,19 @@ const appRoutes = (options: TestAppOptions) => {
   )
 }
 
+/** SQLite with the library's tables, made by the files `keys migrations new` writes, applied in order as alchemy would. */
+export const migratedSqlite = (filename: string) =>
+  Layer.effectDiscard(Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient
+    for (const statement of migrationStatements) yield* sql.unsafe(statement)
+  })).pipe(Layer.provideMerge(SqliteClient.layer({ filename })))
+
 /** The test app as a fetch handler over SQLite, a test clock it moves, and typed clients of it. */
 export const makeTestApp = async (options: TestAppOptions = {}) => {
   const clock = await Effect.runPromise(Effect.scoped(TestClock.make()))
   const { handler, dispose } = HttpRouter.toWebHandler(
     appRoutes(options).pipe(
-      Layer.provide(SqliteClient.layer({ filename: options.filename ?? ":memory:" })),
+      Layer.provide(migratedSqlite(options.filename ?? ":memory:")),
       Layer.provide(HttpServer.layerServices),
       Layer.provide(Layer.succeed(Clock.Clock, clock)),
     ),
@@ -116,7 +128,7 @@ const unusedTerminal = Terminal.make({
 })
 
 const cliEnvironment = Layer.mergeAll(
-  FileSystem.layerNoop({}),
+  BunFileSystem.layer,
   Path.layer,
   Stdio.layerTest({}),
   Layer.succeed(Terminal.Terminal, unusedTerminal),
@@ -125,8 +137,12 @@ const cliEnvironment = Layer.mergeAll(
 
 const printed = (args: ReadonlyArray<string>) => args.join(" ")
 
-/** Runs the app's `keys` command with `args` against `app`, and what it wrote to stdout and stderr. */
-export const runKeysCommand = async (app: TestApp, args: ReadonlyArray<string>, key = adminKey) => {
+/** Runs the app's `keys` command with `args`, sending its calls through `run`, and what it wrote to stdout and stderr. */
+const runCommand = async (
+  args: ReadonlyArray<string>,
+  run: <A, E>(effect: Effect.Effect<A, E, HttpClient.HttpClient>) => Promise<A>,
+  key = adminKey,
+) => {
   const stdout: Array<string> = []
   const stderr: Array<string> = []
   const console: Console.Console = Object.assign(Object.create(globalThis.console), {
@@ -134,7 +150,7 @@ export const runKeysCommand = async (app: TestApp, args: ReadonlyArray<string>, 
     error: (...line: ReadonlyArray<string>) => void stderr.push(printed(line)),
   })
   const keys = keysCommand({ api: TestApi, url: Effect.succeed(baseUrl), adminKey: Effect.succeed(key) })
-  const exit = await app.run(
+  const exit = await run(
     Command.runWith(keys, { version: "0.0.0", renderErrors: false })(args).pipe(
       Effect.provide(cliEnvironment),
       Effect.provideService(Console.Console, console),
@@ -143,6 +159,24 @@ export const runKeysCommand = async (app: TestApp, args: ReadonlyArray<string>, 
   )
   return { exit, stdout, stderr }
 }
+
+/** Runs the app's `keys` command with `args` against `app`, and what it wrote to stdout and stderr. */
+export const runKeysCommand = (app: TestApp, args: ReadonlyArray<string>, key = adminKey) => runCommand(args, app.run, key)
+
+/** Runs `keys migrations …` with `args`, which needs no app. */
+export const runMigrationsCommand = (args: ReadonlyArray<string>) =>
+  runCommand(["migrations", ...args], (effect) => Effect.runPromise(effect.pipe(Effect.provide(FetchHttpClient.layer))))
+
+/** The statements of the files `keys migrations new` writes into an empty folder, in order. */
+const writtenMigrationStatements = async () => {
+  const directory = mkdtempSync(join(tmpdir(), "api-key-auth-migrations-"))
+  await runMigrationsCommand(["new", directory])
+  const files = readdirSync(directory).toSorted().map((name) => readFileSync(join(directory, name), "utf8"))
+  rmSync(directory, { recursive: true, force: true })
+  return files.flatMap((contents) => contents.split(/;\n/u).map((statement) => statement.trim()).filter((statement) => statement !== ""))
+}
+
+const migrationStatements = await writtenMigrationStatements()
 
 /** A key in the format the library makes, never stored. */
 export const unknownKey = () => Base64Url.encode(crypto.getRandomValues(new Uint8Array(32)))

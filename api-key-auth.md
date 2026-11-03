@@ -110,7 +110,7 @@ const routes = HttpApiBuilder.layer(ProxyApi).pipe(
 ```
 
 - `ApiKeyAuth.layer(api, options)` provides the `ApiKeyRoutes` handlers, both middlewares and `ApiKeys`, and needs a
-  `SqlClient`. A compile error, naming the problem, when the `HttpApi` lacks `ApiKeyRoutes`. Middleware the app adds
+  `SqlClient` on a database whose migrations include the library's (section 9). A compile error, naming the problem, when the `HttpApi` lacks `ApiKeyRoutes`. Middleware the app adds
   to its whole API (a rate limit) wraps `ApiKeyRoutes` too, and must be provided, as in email-auth.
 - An app that doesn't want the admin routes (bench's self-serve sign-up) can skip `ApiKeyRoutes` and use
   `ApiKeyAuth.layerBearer({ prefix?, scopes? })` alone, which provides `Bearer` and the `ApiKeys` service for its own
@@ -149,64 +149,51 @@ Command.withSubcommands(proxy, [keys])
 - `<app> keys list [--email <email>]`: a table on stdout (id, name, email, scopes, created, last used, status),
   revoked keys marked.
 - `<app> keys revoke <id>`: confirms on stderr.
+- `<app> keys migrations new <dir>` and `<app> keys migrations check <dir>`: the library's migration files in the app's
+  folder (section 9). They work on files only, without calling the app.
 
 The library takes the url and admin key as effects, so it doesn't depend on effect-lib; the app passes its secrets.
 The command calls the app with effect's fetch client. A failed call is a `KeysCommandError` whose one-line message
 (`https://… refused the admin key`) `Command.run` prints.
 
-### 9. Schema: installing the table
+### 9. Schema: migration files in the app
 
-The library's tables are `api_key_auth_keys` and its bookkeeping table `api_key_auth_schema`. An app may add its own
-nullable columns to the keys table; the library only reads its own.
+The library's table is `api_key_auth_keys`. An app may add its own nullable columns to it; the library only reads its
+own. The library never touches the schema at runtime: no install, no check. The app's migrations create the table,
+from files the library writes:
 
-Options for making this dead simple for the app. **A is implemented**, all of it in `src/SchemaInstall.ts`, so
-another option can replace that module alone:
-
-- **A. Self-installing, at runtime (implemented).** The library ships its schema as a list of versioned, idempotent
-  statements, and `ApiKeyAuth.layer` brings the database up to date once per isolate, before the first query:
-  read `api_key_auth_schema`, run the missing versions as one D1 batch (atomic), record them. The app does nothing,
-  upgrades included. effect's `Migrator` can't be used: it runs in a transaction, which `@effect/sql-d1` refuses.
-  Cost: one read per cold start. Risk: two isolates starting together both try a version; `CREATE … IF NOT EXISTS`
-  and a primary key on the version make that harmless.
-- **B. A CLI that writes the migration into the app.** `bunx api-key-auth migrations ./migrations` adds
-  `NNNN_api_key_auth_vN.sql` with the next free number, only for versions not there yet. The app's usual migration
-  tool (alchemy) applies it on deploy. Reviewable and deploy-time, but a step after every upgrade.
-- **C. Its own D1 database.** The library exports `migrationsDir` and an alchemy helper, and the app declares a second
-  database: `Cloudflare.D1.Database("ApiKeys", { migrations: ApiKeyAuth.migrationsDir })`. Nothing is copied, but
-  the app can't join its tables with the keys (bench lists jobs by key email in one query today) and has two SQL
-  clients.
-- **D. Exported SQL, copied by hand.** The baseline: the docs print the SQL and the app copies it into its
-  migrations. Simple, nothing to build, but every upgrade means reading a changelog.
-
-A is the default; B can be added later for apps that want every DDL in their own migrations, with A switched off
-(`schema: "manual"`, not built yet).
-
-How A works:
-
-- The versions: 1 creates `api_key_auth_keys`; 2 adds an index on `email`. Every statement is `… IF NOT EXISTS`, and a
-  shipped version is never edited; a change is the next version.
-- The keys table: `id TEXT PRIMARY KEY, key_hash TEXT NOT NULL UNIQUE, name TEXT NOT NULL, email TEXT,
+- `<app> keys migrations new <dir>` writes one `NNNN_api_key_auth_vN.sql` per version without a file in `<dir>`,
+  numbered after the folder's last numbered file (`0003_api_key_auth_v1.sql` after bench's `0002_…`), and creates
+  `<dir>` if needed. With every version there, it writes nothing. The app's migration tool (alchemy) applies them on
+  deploy, in order with the app's own, so an app migration can copy rows into the table or reference it.
+- `<app> keys migrations check <dir>` fails, in one line, when a version has no file (naming the versions and
+  `keys migrations new`) or a file no longer holds what `new` wrote; for CI or the app's tests.
+- Both refuse a folder whose library files, in name order (the order they run in), aren't v1, v2, … once each: a
+  version twice, or one before a version it needs (v2 left after v1 was deleted).
+- Upgrading: bump the library, run `keys migrations new`, deploy. A forgotten step shows as SQL errors from the new
+  code, or a failing `check`.
+- The versions: 1 creates `api_key_auth_keys`; 2 adds an index on `email`. A version's file is a header comment and its
+  statements, each ending with `;`. A shipped version is never edited; a change is the next version. Alchemy refuses an
+  applied file whose contents changed, too.
+- The table: `id TEXT PRIMARY KEY, key_hash TEXT NOT NULL UNIQUE, name TEXT NOT NULL, email TEXT,
   scopes TEXT NOT NULL` (a JSON array), `created_at INTEGER NOT NULL, last_used_at INTEGER, revoked_at INTEGER`
-  (milliseconds since the epoch). The bookkeeping table: `version INTEGER PRIMARY KEY, installed_at INTEGER NOT NULL`.
-- Building `ApiKeyAuth.layer` or `layerBearer` reads `api_key_auth_schema`. If that read fails, `sqlite_master` says
-  whether the table is missing (nothing installed) or the read really failed. The missing versions run as one D1
-  batch, or one transaction on drivers without `batch` (SQLite in tests), each recorded with `INSERT OR IGNORE`.
-- If the batch fails and a second read finds every version recorded, another isolate won the race, and all is well;
-  otherwise the layer fails with the `SqlError`.
-- Once up to date, a database isn't checked again in the isolate: the library remembers the D1 binding
-  (`D1Client`'s `config.db`), or the `SqlClient` itself for other drivers. bench builds its layers on every request,
-  so this is what keeps it to one read per cold start.
+  (milliseconds since the epoch).
+- Everything about the schema is in `src/Schema.ts` (the versions, file names and contents); the commands in `cli.ts`.
+
+Considered and dropped: installing at runtime (adds a read per cold start and runs after deploy, too late for bench's
+data migration); its own D1 database with an exported migrations folder (alchemy takes one folder per database, and
+bench joins its jobs with the keys); SQL copied by hand from the docs (the same files, with more mistakes).
 
 ### 10. Package
 
-- Repo `github:laroccacharly/api-key-auth`, used as `bun add github:laroccacharly/api-key-auth#v0.1.0`.
+- Repo `github:laroccacharly/api-key-auth`, used as `bun add github:laroccacharly/api-key-auth#v0.2.0`.
 - `effect` (`^4.1.2`) as a peer dependency, pinned in dev dependencies. No other runtime dependency; `@effect/sql-d1`
   isn't one either: a D1 client is told apart by its `batch` method.
 - Exports: `.` (server, schemas, client middlewares) and `./cli` (the admin CLI), so a Worker bundle never pulls in the
   CLI.
 - Layout, as email-auth: `src/index.ts` (exports), `ApiKeyAuth.ts` (layers, middlewares, client layers),
   `ApiKeyRoutes.ts`, `ApiKey.ts` (schemas), `Middleware.ts` (`Bearer`, `Admin`, `Scope`, `CurrentApiKey`),
-  `ApiKeys.ts`, `KeyStore.ts` (the table), `Key.ts` (format and hash), `SchemaInstall.ts`, `Errors.ts`, `cli.ts`.
+  `ApiKeys.ts`, `KeyStore.ts` (the table), `Key.ts` (format and hash), `Schema.ts` (the migrations), `Errors.ts`, `cli.ts`.
 - TypeScript source, imported directly, no build step.
 - `bun run lint` (oxlint with type checking, then `ts-lint-effect` from `github:laroccacharly/ts-lint`), `bun test`.
 
@@ -216,8 +203,10 @@ Through the public API only, in memory, all under 20 seconds:
 
 - A test `HttpApi` with `ApiKeyRoutes` and two scoped routes, served with `HttpRouter.toWebHandler` over
   `@effect/sql-sqlite-bun` in memory, driven by the library's own clients.
-- Schema, on a SQLite file: a fresh database installs itself; a database at version 1 upgrades to 2 and its keys keep
-  working; two concurrent cold starts don't fail.
+- Schema: the test app's tables come from the files `keys migrations new` writes, applied in order, so every case runs
+  on them. On a temporary folder: `new` writes every version into an empty (or missing) folder, numbers its files
+  after the app's own, writes nothing a second time, and writes only a missing version; `check` passes after `new`,
+  and names a missing version or an edited file; both refuse a version twice or out of order.
 - Cases: create returns a key once, list never shows a hash; the key opens a route with its scope; the prefix is
   applied when set and absent by default; `all` opens every route; a missing scope is 403; no key, a wrong key, a
   revoked key are 401; the admin key on a consumer route and a consumer key on `ApiKeyRoutes` are 401; `email` is
@@ -230,7 +219,8 @@ Through the public API only, in memory, all under 20 seconds:
 ### 12. Consumers
 
 - **proxy**: phase 2 of its `docs/migration.md` becomes wiring this in, with `prefix: "pxy_"` and scopes
-  `push` and `images`.
-- **bench**: its `api_keys` table moves to the library's (a data migration copying `id, key_hash, name, email,
-  created_at`, scopes `["all"]`); its open `POST /api/api-keys` calls `ApiKeys.create`, and it gains list and revoke
+  `push` and `images`; its planned `0001_api_keys.sql` is replaced by the files `proxy keys migrations new` writes.
+- **bench**: its `api_keys` table moves to the library's: `keys migrations new ./migrations` writes
+  `0003_api_key_auth_v1.sql` and `0004_api_key_auth_v2.sql`, then bench's own `0005` copies `id, key_hash, name,
+  email, created_at` with scopes `["all"]`; its open `POST /api/api-keys` calls `ApiKeys.create`, and it gains list and revoke
   through an admin key. Existing keys keep working: the hash is the same.
