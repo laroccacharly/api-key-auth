@@ -1,0 +1,27 @@
+{
+  "name": "api-key-auth",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "API keys for Effect HttpApi servers: hashed in SQL, scoped, with admin routes, a CLI and client middlewares",
+  "exports": {
+    ".": "./src/index.ts",
+    "./cli": "./src/cli.ts"
+  },
+  "scripts": {
+    "test": "bun test",
+    "lint": "oxlint . && ts-lint-effect"
+  },
+  "devDependencies": {
+    "@effect/sql-sqlite-bun": "4.1.2",
+    "@types/bun": "^1.4.4",
+    "effect": "4.1.2",
+    "oxlint": "^1.91.0",
+    "oxlint-tsgolint": "^7.0.2005",
+    "ts-lint": "github:laroccacharly/ts-lint#v0.7.1",
+    "typescript": "^7.0.2"
+  },
+  "peerDependencies": {
+    "effect": "^4.1.2"
+  }
+}

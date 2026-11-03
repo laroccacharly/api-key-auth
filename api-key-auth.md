@@ -1,0 +1,236 @@
+# api-key-auth
+
+API keys for Effect `HttpApi` servers: an admin creates a key, a consumer sends it as a bearer token, and the server
+knows which key called and what it may do. Keys are stored hashed in SQL (D1 on Workers, SQLite in tests). Built to be
+shared by bench and proxy, the way email-auth is shared for email sign-in.
+
+The library owns everything about keys: format, storage, the bearer check, scopes, the admin routes, the admin CLI and
+the client side. The app decides which routes need which scope, and what a key's owner may see.
+
+### 1. The flow
+
+```
+admin CLI                       app (with api-key-auth)                  consumer
+  | POST /api/keys {name,…}    ->|                                          |
+  |   Bearer <admin key>         | constant-time check of the admin key     |
+  |<- { id, name, scopes, key } -| store SHA-256(key), return key once      |
+  |                                                                          |
+  |                              |<- POST /api/push, Bearer <key> ----------|
+  |                              | find by SHA-256, not revoked,            |
+  |                              | scope of the route granted? else 403     |
+  |                              | provide CurrentApiKey to the handler ---->|
+```
+
+### 2. Keys
+
+- A key is 32 random bytes (Web Crypto) in base64url, 43 characters, with an optional prefix set by the app:
+  `ApiKeyAuth.layer(api, { prefix: "pxy_" })` gives `pxy_<43 chars>`. No prefix by default.
+- Shown once, in the answer to its creation. Only its SHA-256, in hex, is stored.
+- A key has: `id` (UUID), `name` (a label, not unique), `email` (optional, e.g. to find someone's keys later, as bench's
+  UI does), `scopes`, `created_at`, `last_used_at`, `revoked_at`.
+- A revoked key stays in the table, so `list` shows it, and answers 401.
+- `last_used_at` is written by the bearer check, at most once a minute per key, so a busy key costs one write a
+  minute, not one per request. A request refused (401, 403) doesn't count as a use.
+- `email` is trimmed and lowercased, as email-auth does, so it can be matched against a signed-in email; by the
+  `ApiKeys` service too, for apps that call it directly.
+
+### 3. Scopes
+
+- A key holds a list of scopes, e.g. `["push"]` or `["push", "images"]`. A scope is a short lowercase name.
+- `all` is reserved: a key with it may call every route, including routes and scopes added later.
+- Routes say which scope they need with an annotation, on all the routes of a set or on one endpoint:
+  ```ts
+  class PushRoutes extends HttpApiGroup.make("push")
+    .add(HttpApiEndpoint.post("notify", "/api/push", { … }))
+    .middleware(ApiKeyAuth.Bearer)
+    .annotate(ApiKeyAuth.Scope, "push") {}
+  ```
+  The bearer middleware reads it (the endpoint's annotation first, then its routes'), so handlers never check scopes.
+  A route without a `Scope` annotation needs only a valid key.
+- A key without the scope gets 403 `Forbidden`.
+- `create` accepts only the scopes the app lists in its options, and `all`; any other is 400 `UnknownScope`
+  `{ scope }`. Duplicates are dropped.
+
+### 4. Naming
+
+Exports never use the word "group": a set of endpoints is "routes" (`ApiKeyRoutes`, `PushRoutes` in the docs), even
+though it is an `HttpApiGroup` underneath.
+
+### 5. HTTP
+
+Admin routes, `ApiKeyRoutes` (the `apiKeys` set, so a typed client calls `client.apiKeys.create(…)`), behind
+`ApiKeyAuth.Admin` (bearer admin key, compared with `Mac.timingSafeEqual` from `effect/crypto` over the SHA-256 of both
+sides, so lengths don't leak; an empty bearer is always 401):
+
+- `POST   /api/keys`      `{ name, email?, scopes }` → `{ id, name, email, scopes, created_at, key }`
+- `GET    /api/keys`      → every key, revoked ones included, oldest first, never the hash; `?email=` filters
+  (normalized like `email`)
+- `DELETE /api/keys/:id`  revokes, 204; an unknown id is 404; revoking again keeps the first `revoked_at`
+
+A key in JSON: `{ id, name, email, scopes, created_at, last_used_at, revoked_at }`, with `null` for an absent email or
+time, and times as ISO 8601 strings. `name` is 1 to 200 characters, `scopes` at least one.
+
+The paths' prefix is configurable (`/api` by default): `makeApiKeyRoutes("/admin")` gives the same routes under
+`/admin/keys`, and `ApiKeyRoutes` is `makeApiKeyRoutes("/api")`.
+
+Consumer routes are the app's own, behind `ApiKeyAuth.Bearer`, which provides `CurrentApiKey`
+(`{ id, name, email, scopes, created_at }`).
+
+The two kinds of key are never interchangeable: a consumer key on `ApiKeyRoutes` and the admin key on the app's routes
+both get 401.
+
+Errors: `Unauthorized` 401 (missing, unknown or revoked key; no detail), `Forbidden` 403 `{ scope }`, `NotFound` 404
+`{ id }`, `UnknownScope` 400 `{ scope }`.
+
+### 6. Using it in an app
+
+```ts
+// api.ts
+import { ApiKeyAuth, ApiKeyRoutes } from "api-key-auth"
+
+class PushRoutes extends HttpApiGroup.make("push")
+  .add(HttpApiEndpoint.post("notify", "/api/push", { payload: Notify }))
+  .middleware(ApiKeyAuth.Bearer)
+  .annotate(ApiKeyAuth.Scope, "push") {}
+
+export class ProxyApi extends HttpApi.make("proxy").add(ApiKeyRoutes).add(PushRoutes) {}
+
+// worker.ts
+const apiKeyAuth = ApiKeyAuth.layer(ProxyApi, {
+  adminKey: Config.Redacted("PROXY_ADMIN_API_KEY"),
+  prefix: "pxy_",           // optional
+  scopes: ["push", "images"], // the scopes `create` accepts, besides `all`
+})
+
+const routes = HttpApiBuilder.layer(ProxyApi).pipe(
+  Layer.provide(pushHandlers),
+  Layer.provide(apiKeyAuth),
+  Layer.provide(D1Client.layer({ db })),
+)
+```
+
+- `ApiKeyAuth.layer(api, options)` provides the `ApiKeyRoutes` handlers, both middlewares and `ApiKeys`, and needs a
+  `SqlClient`. A compile error, naming the problem, when the `HttpApi` lacks `ApiKeyRoutes`. Middleware the app adds
+  to its whole API (a rate limit) wraps `ApiKeyRoutes` too, and must be provided, as in email-auth.
+- An app that doesn't want the admin routes (bench's self-serve sign-up) can skip `ApiKeyRoutes` and use
+  `ApiKeyAuth.layerBearer({ prefix?, scopes? })` alone, which provides `Bearer` and the `ApiKeys` service for its own
+  handlers: `ApiKeys.create({ name, email?, scopes })`, `list({ email? })`, `revoke(id)`, `findByKey(key)` (the key's
+  record, revoked or not, as an `Option`).
+- Handlers read the caller with `yield* CurrentApiKey`.
+
+### 7. Client
+
+```ts
+ApiKeyAuth.layerClient(apiKey)  // HttpApiMiddleware.layerClient for Bearer: adds `Authorization: Bearer <key>`
+ApiKeyAuth.layerAdminClient(adminKey)
+```
+
+An app's own `HttpApiClient` provides these, so its typed client sends the key with no extra code. Neither is required
+by the client's type: a consumer's client provides only `layerClient`, and calls to routes whose middleware it lacks go
+out without a key, and get 401.
+
+### 8. Admin CLI
+
+An `effect/cli` command the app adds to its own CLI, from `api-key-auth/cli`:
+
+```ts
+import { keysCommand } from "api-key-auth/cli"
+
+const keys = keysCommand({
+  api: ProxyApi,
+  url: ProxyUrl.resolve,             // Effect<string>, e.g. an effect-lib Credentials secret
+  adminKey: ProxyAdminApiKey.resolve, // Effect<Redacted<string>>
+})
+Command.withSubcommands(proxy, [keys])
+```
+
+- `<app> keys create <name> [--email <email>] --scope push [--scope images] | --scope all`: prints the key once,
+  alone on stdout, so it pipes (`| cpass …`); everything else on stderr.
+- `<app> keys list [--email <email>]`: a table on stdout (id, name, email, scopes, created, last used, status),
+  revoked keys marked.
+- `<app> keys revoke <id>`: confirms on stderr.
+
+The library takes the url and admin key as effects, so it doesn't depend on effect-lib; the app passes its secrets.
+The command calls the app with effect's fetch client. A failed call is a `KeysCommandError` whose one-line message
+(`https://… refused the admin key`) `Command.run` prints.
+
+### 9. Schema: installing the table
+
+The library's tables are `api_key_auth_keys` and its bookkeeping table `api_key_auth_schema`. An app may add its own
+nullable columns to the keys table; the library only reads its own.
+
+Options for making this dead simple for the app. **A is implemented**, all of it in `src/SchemaInstall.ts`, so
+another option can replace that module alone:
+
+- **A. Self-installing, at runtime (implemented).** The library ships its schema as a list of versioned, idempotent
+  statements, and `ApiKeyAuth.layer` brings the database up to date once per isolate, before the first query:
+  read `api_key_auth_schema`, run the missing versions as one D1 batch (atomic), record them. The app does nothing,
+  upgrades included. effect's `Migrator` can't be used: it runs in a transaction, which `@effect/sql-d1` refuses.
+  Cost: one read per cold start. Risk: two isolates starting together both try a version; `CREATE … IF NOT EXISTS`
+  and a primary key on the version make that harmless.
+- **B. A CLI that writes the migration into the app.** `bunx api-key-auth migrations ./migrations` adds
+  `NNNN_api_key_auth_vN.sql` with the next free number, only for versions not there yet. The app's usual migration
+  tool (alchemy) applies it on deploy. Reviewable and deploy-time, but a step after every upgrade.
+- **C. Its own D1 database.** The library exports `migrationsDir` and an alchemy helper, and the app declares a second
+  database: `Cloudflare.D1.Database("ApiKeys", { migrations: ApiKeyAuth.migrationsDir })`. Nothing is copied, but
+  the app can't join its tables with the keys (bench lists jobs by key email in one query today) and has two SQL
+  clients.
+- **D. Exported SQL, copied by hand.** The baseline: the docs print the SQL and the app copies it into its
+  migrations. Simple, nothing to build, but every upgrade means reading a changelog.
+
+A is the default; B can be added later for apps that want every DDL in their own migrations, with A switched off
+(`schema: "manual"`, not built yet).
+
+How A works:
+
+- The versions: 1 creates `api_key_auth_keys`; 2 adds an index on `email`. Every statement is `… IF NOT EXISTS`, and a
+  shipped version is never edited; a change is the next version.
+- The keys table: `id TEXT PRIMARY KEY, key_hash TEXT NOT NULL UNIQUE, name TEXT NOT NULL, email TEXT,
+  scopes TEXT NOT NULL` (a JSON array), `created_at INTEGER NOT NULL, last_used_at INTEGER, revoked_at INTEGER`
+  (milliseconds since the epoch). The bookkeeping table: `version INTEGER PRIMARY KEY, installed_at INTEGER NOT NULL`.
+- Building `ApiKeyAuth.layer` or `layerBearer` reads `api_key_auth_schema`. If that read fails, `sqlite_master` says
+  whether the table is missing (nothing installed) or the read really failed. The missing versions run as one D1
+  batch, or one transaction on drivers without `batch` (SQLite in tests), each recorded with `INSERT OR IGNORE`.
+- If the batch fails and a second read finds every version recorded, another isolate won the race, and all is well;
+  otherwise the layer fails with the `SqlError`.
+- Once up to date, a database isn't checked again in the isolate: the library remembers the D1 binding
+  (`D1Client`'s `config.db`), or the `SqlClient` itself for other drivers. bench builds its layers on every request,
+  so this is what keeps it to one read per cold start.
+
+### 10. Package
+
+- Repo `github:laroccacharly/api-key-auth`, used as `bun add github:laroccacharly/api-key-auth#v0.1.0`.
+- `effect` (`^4.1.2`) as a peer dependency, pinned in dev dependencies. No other runtime dependency; `@effect/sql-d1`
+  isn't one either: a D1 client is told apart by its `batch` method.
+- Exports: `.` (server, schemas, client middlewares) and `./cli` (the admin CLI), so a Worker bundle never pulls in the
+  CLI.
+- Layout, as email-auth: `src/index.ts` (exports), `ApiKeyAuth.ts` (layers, middlewares, client layers),
+  `ApiKeyRoutes.ts`, `ApiKey.ts` (schemas), `Middleware.ts` (`Bearer`, `Admin`, `Scope`, `CurrentApiKey`),
+  `ApiKeys.ts`, `KeyStore.ts` (the table), `Key.ts` (format and hash), `SchemaInstall.ts`, `Errors.ts`, `cli.ts`.
+- TypeScript source, imported directly, no build step.
+- `bun run lint` (oxlint with type checking, then `ts-lint-effect` from `github:laroccacharly/ts-lint`), `bun test`.
+
+### 11. Testing
+
+Through the public API only, in memory, all under 20 seconds:
+
+- A test `HttpApi` with `ApiKeyRoutes` and two scoped routes, served with `HttpRouter.toWebHandler` over
+  `@effect/sql-sqlite-bun` in memory, driven by the library's own clients.
+- Schema, on a SQLite file: a fresh database installs itself; a database at version 1 upgrades to 2 and its keys keep
+  working; two concurrent cold starts don't fail.
+- Cases: create returns a key once, list never shows a hash; the key opens a route with its scope; the prefix is
+  applied when set and absent by default; `all` opens every route; a missing scope is 403; no key, a wrong key, a
+  revoked key are 401; the admin key on a consumer route and a consumer key on `ApiKeyRoutes` are 401; `email` is
+  normalized and filters `list`; `last_used_at` moves, at most once a minute (with `TestClock`).
+- The CLI against the same in-memory server: create prints only the key on stdout; list; revoke; a wrong admin key
+  fails with a message.
+- `layerBearer` alone, with keys created in the app's own handler, as bench will; `ApiKeyAuth.layer` on an `HttpApi`
+  without `ApiKeyRoutes` is a compile error.
+
+### 12. Consumers
+
+- **proxy**: phase 2 of its `docs/migration.md` becomes wiring this in, with `prefix: "pxy_"` and scopes
+  `push` and `images`.
+- **bench**: its `api_keys` table moves to the library's (a data migration copying `id, key_hash, name, email,
+  created_at`, scopes `["all"]`); its open `POST /api/api-keys` calls `ApiKeys.create`, and it gains list and revoke
+  through an admin key. Existing keys keep working: the hash is the same.
