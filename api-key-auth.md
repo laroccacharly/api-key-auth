@@ -143,20 +143,24 @@ const keys = keysCommand({
   api: ProxyApi,
   url: ProxyUrl.resolve,             // Effect<string>, e.g. an effect-lib Credentials secret
   adminKey: ProxyAdminApiKey.resolve, // Effect<Redacted<string>>
+  keyring: Credentials.bunKeyring(),  // optional, for `create --keyring`: { get, set } by entry name
 })
 Command.withSubcommands(proxy, [keys])
 // …and the app provides an HttpClient: Effect.provide(FetchHttpClient.layer)
 ```
 
 - `<app> keys create <name> [--email <email>] --scope push [--scope images] | --scope all`: prints the key once,
-  alone on stdout, so it pipes (`| cpass …`); everything else on stderr.
+  alone on stdout, so it pipes (`| cpass …`); everything else on stderr. With `--keyring <NAME>` (e.g.
+  `PROXY_API_KEY`), it saves the key in the keyring the app passed, under that name, and prints nothing on stdout. The
+  name must look like an environment variable and be free: both are checked before the key is created, and a taken
+  name is never replaced. If saving fails after the key exists, the key is printed instead, and the command fails.
 - `<app> keys list [--email <email>]`: a table on stdout (id, name, email, scopes, created, last used, status),
   revoked keys marked.
 - `<app> keys revoke <id>` and `<app> keys delete <id>`: confirm on stderr.
 - `<app> keys migrations new <dir>` and `<app> keys migrations check <dir>`: the library's migration files in the app's
   folder (section 9). They work on files only, without calling the app.
 
-The library takes the url and admin key as effects, so it doesn't depend on effect-lib; the app passes its secrets.
+The library takes the url, admin key and keyring from the app, so it doesn't depend on effect-lib; the app passes its secrets.
 The command calls the app through the `HttpClient` the app provides, so it chooses the transport, e.g.
 `FetchHttpClient.layer`. A failed call is a `KeysCommandError` whose one-line message
 (`https://… refused the admin key`) `Command.run` prints.
@@ -216,7 +220,8 @@ Through the public API only, in memory, all under 20 seconds:
   applied when set and absent by default; `all` opens every route; a missing scope is 403; no key, a wrong key, a
   revoked key and a deleted key are 401; the admin key on a consumer route and a consumer key on `ApiKeyRoutes` are 401; `email` is
   normalized and filters `list`; `last_used_at` moves, at most once a minute (with `TestClock`).
-- The CLI against the same in-memory server: create prints only the key on stdout; list; revoke; delete; a wrong admin key
+- The CLI against the same in-memory server: create prints only the key on stdout; `create --keyring` saves it, refuses
+  a taken or malformed name or an app without a keyring before creating a key, and prints the key when saving fails; list; revoke; delete; a wrong admin key
   fails with a message.
 - `layerBearer` alone, with keys created in the app's own handler, as bench will; `ApiKeyAuth.layer` on an `HttpApi`
   without `ApiKeyRoutes` is a compile error.

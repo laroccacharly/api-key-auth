@@ -3,7 +3,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { BunFileSystem } from "@effect/platform-bun"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
-import { Clock, Config, Console, type Duration, Effect, Layer, Path, Redacted, Schema, Stdio, Terminal } from "effect"
+import { Clock, Config, Console, type Duration, Effect, Layer, Option, Path, Redacted, Schema, Stdio, Terminal } from "effect"
 import { Command } from "effect/cli"
 import { Base64Url } from "effect/encoding"
 import { FetchHttpClient, type HttpClient, HttpRouter, HttpServer, HttpServerResponse } from "effect/http"
@@ -11,7 +11,7 @@ import { HttpApi, HttpApiBuilder, HttpApiClient, HttpApiEndpoint, HttpApiGroup, 
 import { ChildProcessSpawner } from "effect/process"
 import { SqlClient } from "effect/sql"
 import { TestClock } from "effect/testing"
-import { keysCommand } from "../src/cli.ts"
+import { type KeysCommandKeyring, keysCommand } from "../src/cli.ts"
 import { ApiKeyAuth, ApiKeyRoutes, CurrentApiKey, makeApiKeyRoutes } from "../src/index.ts"
 
 const Caller = Schema.Struct({ name: Schema.String, scopes: Schema.Array(Schema.String) })
@@ -142,6 +142,7 @@ const runCommand = async (
   args: ReadonlyArray<string>,
   run: <A, E>(effect: Effect.Effect<A, E, HttpClient.HttpClient>) => Promise<A>,
   key = adminKey,
+  keyring?: KeysCommandKeyring,
 ) => {
   const stdout: Array<string> = []
   const stderr: Array<string> = []
@@ -149,7 +150,7 @@ const runCommand = async (
     log: (...line: ReadonlyArray<string>) => void stdout.push(printed(line)),
     error: (...line: ReadonlyArray<string>) => void stderr.push(printed(line)),
   })
-  const keys = keysCommand({ api: TestApi, url: Effect.succeed(baseUrl), adminKey: Effect.succeed(key) })
+  const keys = keysCommand({ api: TestApi, url: Effect.succeed(baseUrl), adminKey: Effect.succeed(key), ...(keyring && { keyring }) })
   const exit = await run(
     Command.runWith(keys, { version: "0.0.0", renderErrors: false })(args).pipe(
       Effect.provide(cliEnvironment),
@@ -162,6 +163,20 @@ const runCommand = async (
 
 /** Runs the app's `keys` command with `args` against `app`, and what it wrote to stdout and stderr. */
 export const runKeysCommand = (app: TestApp, args: ReadonlyArray<string>, key = adminKey) => runCommand(args, app.run, key)
+
+/** `runKeysCommand`, with the app giving the command `keyring`. */
+export const runKeysCommandWithKeyring = (app: TestApp, args: ReadonlyArray<string>, keyring: KeysCommandKeyring) =>
+  runCommand(args, app.run, adminKey, keyring)
+
+/** A keyring held in `entries`; `set` fails when `failing`. */
+export const memoryKeyring = (entries: Map<string, string>, failing = false): KeysCommandKeyring => ({
+  get: (name) => Effect.succeed(Option.fromUndefinedOr(entries.get(name))),
+  set: (name, value) => {
+    if (failing) return Effect.fail({ message: "locked" })
+    entries.set(name, value)
+    return Effect.void
+  },
+})
 
 /** Runs `keys migrations …` with `args`, which needs no app. */
 export const runMigrationsCommand = (args: ReadonlyArray<string>) =>

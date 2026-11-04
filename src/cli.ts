@@ -14,6 +14,14 @@ export interface KeysCommandOptions<ApiId extends string, Groups extends HttpApi
   /** Where the app is reached, e.g. `https://proxy.example.com`. */
   readonly url: Effect.Effect<string, E, R>
   readonly adminKey: Effect.Effect<Redacted.Redacted<string>, E, R>
+  /** Where `create --keyring <NAME>` saves the key instead of printing it, e.g. effect-lib's `Credentials.bunKeyring()`. */
+  readonly keyring?: KeysCommandKeyring<R>
+}
+
+/** The OS keyring, one entry per name; `get` is none when there is no entry. */
+export interface KeysCommandKeyring<R = never> {
+  readonly get: (name: string) => Effect.Effect<Option.Option<string>, { readonly message: string }, R>
+  readonly set: (name: string, value: string) => Effect.Effect<void, { readonly message: string }, R>
 }
 
 /** Something the command couldn't do, said in one line, which `Command.run` prints. */
@@ -65,8 +73,17 @@ const formatTable = (rows: ReadonlyArray<ReadonlyArray<string>>) => {
 const nameArgument = Argument.String("name").pipe(Argument.withDescription("A label for the key; it needn't be unique"))
 const emailFlag = Flag.String("email").pipe(Flag.optional, Flag.withDescription("Whose key it is, to find their keys later"))
 const scopeFlag = Flag.String("scope").pipe(Flag.atLeast(1), Flag.withDescription("A scope the key may call, or `all`; repeat for more"))
+const keyringFlag = Flag.String("keyring").pipe(
+  Flag.optional,
+  Flag.withDescription("Save the key in the OS keyring under this name, e.g. PROXY_API_KEY, instead of printing it"),
+)
 const idArgument = Argument.String("id").pipe(Argument.withDescription("The key's id, from `list`"))
 const dirArgument = Argument.Directory("dir").pipe(Argument.withDescription("The app's migrations folder, e.g. ./migrations"))
+
+// An environment-variable-like name, as effect-lib's secrets read the same entry from the environment.
+const ENTRY_NAME = /^[A-Z][A-Z0-9_]*$/u
+
+const keyringFailure = (error: { readonly message: string }) => new KeysCommandError({ message: `The keyring failed: ${error.message}` })
 
 const fileSystemFailure = (error: PlatformError.PlatformError) => new KeysCommandError({ message: error.message })
 
@@ -147,14 +164,36 @@ export const keysCommand = <ApiId extends string, Groups extends HttpApiGroup.Co
       return yield* use(client.apiKeys).pipe(Effect.mapError((error) => new KeysCommandError({ message: messageOf(baseUrl, error) })))
     })
 
-  const create = Command.make("create", { name: nameArgument, email: emailFlag, scopes: scopeFlag }, ({ name, email, scopes }) =>
-    Effect.gen(function* () {
-      if (!Array.isReadonlyArrayNonEmpty(scopes)) return yield* new KeysCommandError({ message: "Give at least one --scope" })
-      const payload = Option.match(email, { onNone: () => ({ name, scopes }), onSome: (address) => ({ name, email: address, scopes }) })
-      const created = yield* callApiKeyRoutes((client) => client.create({ payload }))
-      yield* Console.error(`Created the key ${created.name} (${created.id}), scopes ${created.scopes.join(", ")}. It is shown once:`)
-      yield* Console.log(created.key)
-    })).pipe(Command.withDescription("Create a key and print it, alone on stdout"))
+  /** Where `create --keyring <entry>` saves the key: an entry the keyring hasn't got, checked before the key exists. */
+  const keyringTarget = Effect.fnUntraced(function* (entry: string) {
+    if (options.keyring === undefined) return yield* new KeysCommandError({ message: "This app can't save keys in a keyring: drop --keyring" })
+    if (!ENTRY_NAME.test(entry)) return yield* new KeysCommandError({ message: `${entry} isn't a keyring name like PROXY_API_KEY` })
+    const keyring = options.keyring
+    if (Option.isSome(yield* keyring.get(entry).pipe(Effect.mapError(keyringFailure)))) {
+      return yield* new KeysCommandError({ message: `The keyring already has ${entry}; pick another name` })
+    }
+    return { entry, set: (key: string) => keyring.set(entry, key) }
+  })
+
+  const create = Command.make(
+    "create",
+    { name: nameArgument, email: emailFlag, scopes: scopeFlag, keyring: keyringFlag },
+    ({ name, email, scopes, keyring }) =>
+      Effect.gen(function* () {
+        if (!Array.isReadonlyArrayNonEmpty(scopes)) return yield* new KeysCommandError({ message: "Give at least one --scope" })
+        const target = yield* Effect.transposeOption(Option.map(keyring, keyringTarget))
+        const payload = Option.match(email, { onNone: () => ({ name, scopes }), onSome: (address) => ({ name, email: address, scopes }) })
+        const created = yield* callApiKeyRoutes((client) => client.create({ payload }))
+        const summary = `Created the key ${created.name} (${created.id}), scopes ${created.scopes.join(", ")}.`
+        const print = (said: string) => Console.error(`${summary} ${said}`).pipe(Effect.andThen(Console.log(created.key)))
+        if (Option.isNone(target)) return yield* print("It is shown once:")
+        yield* target.value.set(created.key).pipe(
+          // The key exists now and is never shown again: print it rather than lose it.
+          Effect.catch((error) => print(`Saving it as ${target.value.entry} failed, so it is shown once:`).pipe(Effect.andThen(Effect.fail(keyringFailure(error))))),
+        )
+        yield* Console.error(`${summary} Saved in the keyring as ${target.value.entry}.`)
+      }),
+  ).pipe(Command.withDescription("Create a key and print it, alone on stdout, or save it in the keyring with --keyring"))
 
   const list = Command.make("list", { email: emailFlag }, ({ email }) =>
     Effect.gen(function* () {

@@ -1,6 +1,6 @@
 import { afterEach, expect, test } from "bun:test"
 import { Effect, Exit, Redacted } from "effect"
-import { makeTestApp, runKeysCommand, type TestApp } from "./app.ts"
+import { makeTestApp, memoryKeyring, runKeysCommand, runKeysCommandWithKeyring, type TestApp } from "./app.ts"
 
 let app: TestApp
 
@@ -70,4 +70,39 @@ test("a wrong admin key fails with a message, and prints no key", async () => {
   expect(stdout).toEqual([])
   expect(Exit.isFailure(exit)).toBe(true)
   expect(String(exit)).toContain("refused the admin key")
+})
+
+test("create --keyring saves the key under that name, prints nothing on stdout, and it works", async () => {
+  app = await makeTestApp()
+  const entries = new Map<string, string>()
+  const { exit, stdout, stderr } = await runKeysCommandWithKeyring(app, ["create", "proxy", "--scope", "push", "--keyring", "PROXY_API_KEY"], memoryKeyring(entries))
+  expect(Exit.isSuccess(exit)).toBe(true)
+  expect(stdout).toEqual([])
+  expect(stderr.join("\n")).toContain("Saved in the keyring as PROXY_API_KEY")
+  expect(await push(entries.get("PROXY_API_KEY") ?? "")).toBe("ok")
+})
+
+test("create --keyring refuses a taken or malformed entry, and creates no key", async () => {
+  app = await makeTestApp()
+  const entries = new Map([["PROXY_API_KEY", "kept"]])
+  for (const entry of ["PROXY_API_KEY", "proxy key"]) {
+    const { exit } = await runKeysCommandWithKeyring(app, ["create", "proxy", "--scope", "push", "--keyring", entry], memoryKeyring(entries))
+    expect(Exit.isFailure(exit)).toBe(true)
+  }
+  expect(entries.get("PROXY_API_KEY")).toBe("kept")
+  expect(await idOf("proxy")).toBe("")
+})
+
+test("create --keyring prints the key when saving it fails, and fails", async () => {
+  app = await makeTestApp()
+  const { exit, stdout } = await runKeysCommandWithKeyring(app, ["create", "proxy", "--scope", "push", "--keyring", "PROXY_API_KEY"], memoryKeyring(new Map(), true))
+  expect(Exit.isFailure(exit)).toBe(true)
+  expect(await push(stdout[0] ?? "")).toBe("ok")
+})
+
+test("create --keyring fails, creating no key, when the app gave no keyring", async () => {
+  app = await makeTestApp()
+  const { exit } = await runKeysCommand(app, ["create", "proxy", "--scope", "push", "--keyring", "PROXY_API_KEY"])
+  expect(Exit.isFailure(exit)).toBe(true)
+  expect(await idOf("proxy")).toBe("")
 })
